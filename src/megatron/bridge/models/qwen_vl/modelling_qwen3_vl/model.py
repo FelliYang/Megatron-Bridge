@@ -221,6 +221,14 @@ class Qwen3VLModel(MegatronModule):
         # position ids is computed within the model
         position_ids = None
 
+        # Get cu_seqlens for packing support
+        cu_seqlens_padded = None
+        if packed_seq_params is not None:
+            if packed_seq_params.cu_seqlens_q_padded is not None:
+                cu_seqlens_padded = packed_seq_params.cu_seqlens_q_padded
+            else:
+                cu_seqlens_padded = packed_seq_params.cu_seqlens_q
+
         torch.cuda.nvtx.range_push("Qwen3VLModel.forward.pre_process")
         if self.pre_process:
             if image_grid_thw is not None or video_grid_thw is not None:
@@ -304,17 +312,61 @@ class Qwen3VLModel(MegatronModule):
             visual_pos_masks = None
 
         if position_ids is None:
+            # For packing (THD format), we need to convert input_ids to BSHD format
+            # before calling get_rope_index, then convert position_ids back to THD format
+            input_ids_for_rope_index = input_ids
+            attention_mask_for_rope = attention_mask
+
+            if cu_seqlens_padded is not None:
+                # THD (1, total_len) -> BSHD (batch_size, max_seq_len)
+                def thd_to_bshd(packed_values: torch.Tensor, cu_seqlens: torch.Tensor):
+                    seqlens = cu_seqlens[1:] - cu_seqlens[:-1]
+                    max_seq_len = seqlens.max()
+                    bs = len(cu_seqlens) - 1
+                    results = packed_values.new_zeros(size=(bs, max_seq_len, *packed_values.shape[2:]))
+                    for i, seqlen in enumerate(seqlens):
+                        results[i, :seqlen] = packed_values[0, cu_seqlens[i]: cu_seqlens[i] + seqlen]
+                    return results
+
+                # BSHD (batch_size, seq_len, ...) -> THD (1, total_len, ...)
+                def bshd_to_thd(unpacked_values: torch.Tensor, cu_seqlens: torch.Tensor):
+                    seqlens = cu_seqlens[1:] - cu_seqlens[:-1]
+                    total_len = cu_seqlens[-1]
+                    results = unpacked_values.new_zeros(size=(1, total_len, *unpacked_values.shape[2:]))
+                    for i, seqlen in enumerate(seqlens):
+                        results[0, cu_seqlens[i]: cu_seqlens[i] + seqlen] = unpacked_values[i, :seqlen]
+                    return results
+
+                input_ids_for_rope_index = thd_to_bshd(input_ids, cu_seqlens_padded)
+
+                # Construct BSHD attention_mask for get_rope_index
+                # Shape: (batch_size, max_seq_len), 1 for valid tokens, 0 for padding
+                seqlens = cu_seqlens_padded[1:] - cu_seqlens_padded[:-1]
+                max_seq_len = seqlens.max()
+                bs = len(cu_seqlens_padded) - 1
+                attention_mask_for_rope = input_ids.new_zeros(size=(bs, max_seq_len), dtype=torch.long)
+                for i, seqlen in enumerate(seqlens):
+                    attention_mask_for_rope[i, :seqlen] = 1
+
             position_ids, _ = get_rope_index(
                 self.config.spatial_merge_size,
                 self.image_token_id,
                 self.video_token_id,
                 self.vision_start_token_id,
-                input_ids,
+                input_ids_for_rope_index,
                 image_grid_thw=image_grid_thw,
                 video_grid_thw=video_grid_thw,
-                attention_mask=attention_mask,
-                packed_seq_params=packed_seq_params,
+                attention_mask=attention_mask_for_rope,
+                packed_seq_params=packed_seq_params if cu_seqlens_padded is None else None,
             )
+
+            # Convert position_ids back to THD format if packing is enabled
+            if cu_seqlens_padded is not None:
+                # position_ids shape: (3, batch_size, seq_len) -> (3, 1, total_len)
+                position_ids = bshd_to_thd(
+                    position_ids.permute(1, 2, 0),  # -> (bs, seq_len, 3)
+                    cu_seqlens_padded
+                ).permute(2, 0, 1)  # -> (3, 1, total_len)
 
         deepstack_visual_embeds = deepstack_feature_lists
         if self.config.sequence_parallel:
