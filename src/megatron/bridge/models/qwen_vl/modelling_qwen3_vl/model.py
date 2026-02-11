@@ -373,6 +373,35 @@ class Qwen3VLModel(MegatronModule):
                     cu_seqlens_padded
                 ).permute(2, 0, 1)  # -> (3, 1, total_len)
 
+            # Debug: Save position_ids for first 5 batches on rank 0
+            if not hasattr(self, '_debug_batch_count'):
+                self._debug_batch_count = 0
+            if self._debug_batch_count < 5:
+                try:
+                    rank = mpu.get_data_parallel_rank() if hasattr(mpu, 'get_data_parallel_rank') else 0
+                    if rank == 0:
+                        debug_dir = "debug_position_ids"
+                        # Clear debug directory on first batch (only rank 0)
+                        if self._debug_batch_count == 0:
+                            import shutil
+                            if os.path.exists(debug_dir):
+                                shutil.rmtree(debug_dir)
+                        os.makedirs(debug_dir, exist_ok=True)
+                        debug_data = {
+                            'batch_idx': self._debug_batch_count,
+                            'position_ids': position_ids.cpu(),
+                            'input_ids': input_ids.cpu(),
+                            'cu_seqlens_padded': cu_seqlens_padded.cpu() if cu_seqlens_padded is not None else None,
+                            'image_grid_thw': image_grid_thw.cpu() if image_grid_thw is not None else None,
+                            'video_grid_thw': video_grid_thw.cpu() if video_grid_thw is not None else None,
+                        }
+                        save_path = os.path.join(debug_dir, f"batch_{self._debug_batch_count}.pt")
+                        torch.save(debug_data, save_path)
+                        print(f"[DEBUG] Saved position_ids for batch {self._debug_batch_count} to {save_path}")
+                except Exception as e:
+                    print(f"[DEBUG] Failed to save position_ids: {e}")
+                self._debug_batch_count += 1
+
         deepstack_visual_embeds = deepstack_feature_lists
         if self.config.sequence_parallel:
             visual_pos_masks, deepstack_visual_embeds = split_deepstack_embs(
