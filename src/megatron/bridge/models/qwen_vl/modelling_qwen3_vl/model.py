@@ -80,7 +80,12 @@ class Qwen3VLModel(MegatronModule):
 
         if self.pre_process:
             # Initialize vision model with random weights from config
-            self.vision_model = Qwen3VLVisionModelHF._from_config(vision_transformer_config)
+            # Use configured attention implementation (default: sdpa, can be flash_attention_2)
+            vision_attn_impl = getattr(language_transformer_config, 'vision_attn_implementation', 'sdpa')
+            self.vision_model = Qwen3VLVisionModelHF._from_config(
+                vision_transformer_config,
+                attn_implementation=vision_attn_impl,
+            )
             # Ensure HF visual tower params are marked for TP grad sync and future assignments are hooked.
             hook_hf_module_setattr_for_tp_grad_sync(self.vision_model)
             # Move to device if available

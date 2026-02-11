@@ -49,3 +49,10 @@ class Qwen3VLTransformerConfig(TransformerConfig):
     video_token_id: int = 151656
     vision_start_token_id: int = 151652
     hf_text_config: Optional[Qwen3VLTextConfig] = None
+
+    # Recompute skip layers: skip the first N layers (e.g., DeepStack layers) from recomputation
+    # When set to 3, layers 0,1,2 will NOT be recomputed, layers 3+ will be recomputed
+    recompute_skip_num_layers: int = 0
+
+    # Vision model attention implementation: "sdpa" (default), "flash_attention_2", or "eager"
+    vision_attn_implementation: str = "sdpa"

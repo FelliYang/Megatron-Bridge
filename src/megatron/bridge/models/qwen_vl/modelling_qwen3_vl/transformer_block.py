@@ -105,7 +105,12 @@ class Qwen3VLTransformerBlock(TransformerBlock):
             return custom_forward
 
         def checkpoint_handler(forward_func):
-            """Determines whether to use the `te_checkpoint` or `tensor_parallel.checkpoint`"""
+            """Determines whether to use the `te_checkpoint` or `tensor_parallel.checkpoint`
+
+            Note: DeepStack layers should be skipped from recomputation (via recompute_skip_num_layers),
+            so checkpointed layers don't need visual_pos_masks/deepstack_visual_embeds. Pass None to
+            avoid "save_for_backward can only save variables, but argument is of type list" error.
+            """
             if self.config.fp8:
                 return te_checkpoint(
                     forward_func,
@@ -117,8 +122,8 @@ class Qwen3VLTransformerBlock(TransformerBlock):
                     context,
                     context_mask,
                     rotary_pos_emb,
-                    visual_pos_masks,
-                    deepstack_visual_embeds,
+                    None,  # visual_pos_masks - not needed for non-DeepStack layers
+                    None,  # deepstack_visual_embeds - not needed for non-DeepStack layers
                 )
             else:
                 return tensor_parallel.checkpoint(
@@ -129,14 +134,22 @@ class Qwen3VLTransformerBlock(TransformerBlock):
                     context,
                     context_mask,
                     rotary_pos_emb,
-                    visual_pos_masks,
-                    deepstack_visual_embeds,
+                    None,  # visual_pos_masks - not needed for non-DeepStack layers
+                    None,  # deepstack_visual_embeds - not needed for non-DeepStack layers
                 )
 
         if self.config.recompute_method == "uniform":
             # Uniformly divide the total number of Transformer layers and checkpoint
             # the input activation of each divided chunk.
             # A method to further reduce memory usage reducing checkpoints.
+            # Note: uniform method with full granularity is not compatible with DeepStack layers on PP rank 0
+            pp_rank = parallel_state.get_pipeline_model_parallel_rank()
+            if self.config.recompute_granularity == "full" and pp_rank == 0:
+                raise ValueError(
+                    "recompute_granularity='full' with recompute_method='uniform' is not supported "
+                    "for Qwen3VL on PP rank 0 (DeepStack layers). Use recompute_method='block' with "
+                    "recompute_skip_num_layers>=3, or use recompute_granularity='selective'."
+                )
             layer_idx = 0
             while layer_idx < self.num_layers_per_pipeline_rank:
                 hidden_states, context = checkpoint_handler(
@@ -150,16 +163,44 @@ class Qwen3VLTransformerBlock(TransformerBlock):
             # Transformer layers and skip the rest.
             # A method fully use the device memory removing redundant re-computation.
             recompute_skip_num_layers = 0
+            # Support skipping first N layers (e.g., DeepStack layers) from recomputation
+            # Only apply on PP rank 0 where DeepStack layers exist
+            pp_rank = parallel_state.get_pipeline_model_parallel_rank()
+            config_skip = getattr(self.config, 'recompute_skip_num_layers', 0) if pp_rank == 0 else 0
+
+            # DeepStack layers (first 3 layers on PP rank 0) must be skipped from recomputation,
+            # otherwise checkpoint will fail due to list type arguments (visual_pos_masks, deepstack_visual_embeds)
+            num_deepstack_layers = 3
+            assert pp_rank != 0 or config_skip >= num_deepstack_layers, (
+                f"recompute_skip_num_layers must be >= {num_deepstack_layers} (DeepStack layers) on PP rank 0, "
+                f"but got {config_skip}. Set recompute_skip_num_layers={num_deepstack_layers} in your config."
+            )
+
+            # Log recompute skip info once
+            if not hasattr(self, '_recompute_skip_logged'):
+                self._recompute_skip_logged = True
+                if config_skip > 0:
+                    skip_layers = list(range(config_skip))
+                    recompute_layers = list(range(config_skip, min(config_skip + self.config.recompute_num_layers, self.num_layers_per_pipeline_rank)))
+                    print(f"[Recompute Skip] PP rank {pp_rank}: skip layers {skip_layers}, recompute layers {recompute_layers}")
+                else:
+                    recompute_layers = list(range(min(self.config.recompute_num_layers, self.num_layers_per_pipeline_rank)))
+                    print(f"[Recompute Skip] PP rank {pp_rank}: no skip, recompute layers {recompute_layers}")
+
             for layer_idx in range(self.num_layers_per_pipeline_rank):
                 # Skip recomputation when input grad computation is not needed.
                 # Need to have at least one input tensor with gradient computation
                 # for re-enterant autograd engine.
                 if self.config.fp8 and not hidden_states.requires_grad:
                     recompute_skip_num_layers += 1
+                # Combine FP8 skip and config skip
+                effective_skip = max(recompute_skip_num_layers, config_skip)
+                # Recompute layers from effective_skip to (effective_skip + recompute_num_layers)
                 if (
-                    layer_idx >= recompute_skip_num_layers
-                    and layer_idx < self.config.recompute_num_layers + recompute_skip_num_layers
+                    layer_idx >= effective_skip
+                    and layer_idx < self.config.recompute_num_layers + effective_skip
                 ):
+                    # Checkpointed layers don't need DeepStack (those are skipped)
                     hidden_states, context = checkpoint_handler(custom(layer_idx, layer_idx + 1))
                 else:
                     hidden_states, context = custom(layer_idx, layer_idx + 1)(
@@ -348,3 +389,4 @@ class Qwen3VLTransformerBlock(TransformerBlock):
         hidden_states[visual_pos_masks, :] = local_this
         hidden_states = hidden_states.transpose(0, 1).contiguous()
         return hidden_states
+
