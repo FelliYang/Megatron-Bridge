@@ -622,7 +622,7 @@ def save_checkpoint(
                 content_metadata=sharded_sd_metadata,
             )
             # [ModelOpt]: save sharded modelopt_state
-            save_sharded_modelopt_state(model, checkpoint_name, (ckpt_cfg.ckpt_format, 1))
+            # save_sharded_modelopt_state(model, checkpoint_name, (ckpt_cfg.ckpt_format, 1))
     else:
         # [ModelOpt]: Inject modelopt_state into state_dict
         if ckpt_type == CheckpointType.LOCAL:
@@ -855,7 +855,12 @@ def maybe_save_dataloader_state(train_iterator: Any, iteration: int, dataloader_
 
     dataloader_save_dict = {}
     dataloader_save_dict["dataloader_state_dict"] = train_dataloader_state_dict
-    torch.save(dataloader_save_dict, data_state_save_path)
+    if  MultiStorageClientFeature.is_enabled():
+        msc = MultiStorageClientFeature.import_package()
+        torch_save = msc.torch.save
+    else:
+        torch_save = torch.save
+    torch_save(dataloader_save_dict, data_state_save_path)
 
 
 def save_tokenizer_assets(
