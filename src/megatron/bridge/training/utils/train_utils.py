@@ -505,6 +505,22 @@ def training_log(
         writer.add_scalar("batch-size vs samples", batch_size, global_state.train_state.consumed_train_samples)
         if wandb_writer:
             wandb_writer.log({"batch-size": batch_size}, iteration)
+        if global_state.train_state.consumed_non_pad_tokens > 0:
+            writer.add_scalar(
+                "consumed-loss-tokens", global_state.train_state.consumed_non_pad_tokens, iteration
+            )
+            if wandb_writer:
+                wandb_writer.log(
+                    {"consumed-loss-tokens": global_state.train_state.consumed_non_pad_tokens}, iteration
+                )
+        if global_state.train_state.consumed_total_tokens > 0:
+            writer.add_scalar(
+                "consumed-total-tokens", global_state.train_state.consumed_total_tokens, iteration
+            )
+            if wandb_writer:
+                wandb_writer.log(
+                    {"consumed-total-tokens": global_state.train_state.consumed_total_tokens}, iteration
+                )
         for key in loss_dict:
             writer.add_scalar(key, loss_dict[key], iteration)
             writer.add_scalar(key + " vs samples", loss_dict[key], global_state.train_state.consumed_train_samples)
@@ -606,6 +622,14 @@ def training_log(
         log_string = f" [{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}]"
         log_string += " iteration {:8d}/{:8d} |".format(iteration, train_config.train_iters)
         log_string += " consumed samples: {:12d} |".format(global_state.train_state.consumed_train_samples)
+        if global_state.train_state.consumed_non_pad_tokens > 0:
+            log_string += " consumed loss tokens: {:12d} |".format(
+                global_state.train_state.consumed_non_pad_tokens
+            )
+        if global_state.train_state.consumed_total_tokens > 0:
+            log_string += " consumed total tokens: {:12d} |".format(
+                global_state.train_state.consumed_total_tokens
+            )
         if global_state.train_state.skipped_train_samples > 0:
             log_string += " skipped samples: {:12d} |".format(global_state.train_state.skipped_train_samples)
         log_string += " elapsed time per iteration (ms): {:.1f} |".format(elapsed_time_per_iteration * 1000.0)
@@ -751,7 +775,7 @@ def report_l2_norm_grad(model: list[MegatronModule]) -> dict:
 
     for model_chunk in model:
         for name, p in model_chunk.named_parameters():
-            if p.main_grad is not None and p.requires_grad:
+            if p.requires_grad and p.main_grad is not None :
                 if f"l2_norm/grad/{name}" not in optimizer_metrics:
                     param_grad_norm = torch.linalg.vector_norm(p.main_grad)
                     optimizer_metrics[f"l2_norm/grad/{name}"] = param_grad_norm
