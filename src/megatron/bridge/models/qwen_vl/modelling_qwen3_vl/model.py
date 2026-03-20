@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import os
+import shutil
 import torch
 from megatron.core import InferenceParams, mpu, tensor_parallel
 from megatron.core.packed_seq_params import PackedSeqParams
@@ -383,7 +385,6 @@ class Qwen3VLModel(MegatronModule):
                         debug_dir = "debug_position_ids"
                         # Clear debug directory on first batch (only rank 0)
                         if self._debug_batch_count == 0:
-                            import shutil
                             if os.path.exists(debug_dir):
                                 shutil.rmtree(debug_dir)
                         os.makedirs(debug_dir, exist_ok=True)
