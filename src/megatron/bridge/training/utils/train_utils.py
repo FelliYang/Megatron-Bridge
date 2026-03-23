@@ -455,10 +455,17 @@ def training_log(
 
     if writer and (iteration % logger_config.tensorboard_log_interval == 0):
         if logger_config.log_throughput_to_tensorboard:
+            # Use model.seq_length if it has been overridden (e.g. by packed_max_seq_len hack),
+            # otherwise fall back to dataset.seq_length.
+            _throughput_seq_length = (
+                config.model.seq_length
+                if config.model.seq_length > config.dataset.seq_length
+                else config.dataset.seq_length
+            )
             throughput_report = report_throughput(
                 iteration=iteration,
                 train_config=train_config,
-                seq_length=config.dataset.seq_length,
+                seq_length=_throughput_seq_length,
                 history_wct=history_wct,
                 window_size=logger_config.throughput_window_size,
             )
@@ -474,10 +481,15 @@ def training_log(
             if wandb_writer:
                 wandb_writer.log(memory_report, iteration)
         if logger_config.log_runtime_to_tensorboard:
+            _runtime_seq_length = (
+                config.model.seq_length
+                if config.model.seq_length > config.dataset.seq_length
+                else config.dataset.seq_length
+            )
             runtime_report = report_runtime(
                 train_state=train_state,
                 start_time=global_state.start_time,
-                seq_length=config.dataset.seq_length,
+                seq_length=_runtime_seq_length,
                 train_iters=train_config.train_iters,
                 time_unit=logger_config.runtime_time_unit,
             )
@@ -775,7 +787,7 @@ def report_l2_norm_grad(model: list[MegatronModule]) -> dict:
 
     for model_chunk in model:
         for name, p in model_chunk.named_parameters():
-            if p.requires_grad and p.main_grad is not None :
+            if p.requires_grad and p.main_grad is not None:
                 if f"l2_norm/grad/{name}" not in optimizer_metrics:
                     param_grad_norm = torch.linalg.vector_norm(p.main_grad)
                     optimizer_metrics[f"l2_norm/grad/{name}"] = param_grad_norm
